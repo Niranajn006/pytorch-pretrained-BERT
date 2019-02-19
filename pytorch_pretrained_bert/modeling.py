@@ -338,7 +338,7 @@ class BertAttention(nn.Module):
     def forward(self, input_tensor, attention_mask):
         self_output = self.self(input_tensor, attention_mask)
         attention_output = self.output(self_output, input_tensor)
-        return attention_output
+        return attention_output, self_output #! Add self-attention head output
 
 
 class BertIntermediate(nn.Module):
@@ -378,10 +378,10 @@ class BertLayer(nn.Module):
         self.output = BertOutput(config)
 
     def forward(self, hidden_states, attention_mask):
-        attention_output = self.attention(hidden_states, attention_mask)
+        attention_output, self_output = self.attention(hidden_states, attention_mask) #! Add self-attention head output
         intermediate_output = self.intermediate(attention_output)
         layer_output = self.output(intermediate_output, attention_output)
-        return layer_output
+        return layer_output, self_output #! Add self-attention head output
 
 
 class BertEncoder(nn.Module):
@@ -392,13 +392,17 @@ class BertEncoder(nn.Module):
 
     def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True):
         all_encoder_layers = []
+        all_self_attention_layers = []
+
         for layer_module in self.layer:
-            hidden_states = layer_module(hidden_states, attention_mask)
+            hidden_states, self_output = layer_module(hidden_states, attention_mask) #! Add self-attention head output
             if output_all_encoded_layers:
                 all_encoder_layers.append(hidden_states)
+                all_self_attention_layers.append(self_output)
         if not output_all_encoded_layers:
             all_encoder_layers.append(hidden_states)
-        return all_encoder_layers
+            all_self_attention_layers.append(self_output)
+        return all_encoder_layers, all_self_attention_layers
 
 
 class BertPooler(nn.Module):
@@ -709,14 +713,15 @@ class BertModel(BertPreTrainedModel):
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
 
         embedding_output = self.embeddings(input_ids, token_type_ids)
-        encoded_layers = self.encoder(embedding_output,
+        encoded_layers, self_attention_layers = self.encoder(embedding_output,
                                       extended_attention_mask,
-                                      output_all_encoded_layers=output_all_encoded_layers)
+                                      output_all_encoded_layers=output_all_encoded_layers) #! Add self-attention head output
         sequence_output = encoded_layers[-1]
         pooled_output = self.pooler(sequence_output)
         if not output_all_encoded_layers:
             encoded_layers = encoded_layers[-1]
-        return encoded_layers, pooled_output
+            self_attention_layers = self_attention_layers[-1] #! Add self-attention head output
+        return encoded_layers, pooled_output, self_attention_layers #! Add self-attention head output
 
 
 class BertForPreTraining(BertPreTrainedModel):
