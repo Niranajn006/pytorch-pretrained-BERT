@@ -295,10 +295,10 @@ class Attention(nn.Module):
         key = self.split_heads(key, k=True)
         value = self.split_heads(value)
         a = self._attn(query, key, value)
-        a = self.merge_heads(a)
-        a = self.c_proj(a)
+        self_output = self.merge_heads(a) #! Add self-attention head output
+        a = self.c_proj(self_output)
         a = self.resid_dropout(a)
-        return a
+        return a, self_output #! Add self-attention head output
 
 
 class MLP(nn.Module):
@@ -326,11 +326,11 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(nx, eps=config.layer_norm_epsilon)
 
     def forward(self, x):
-        a = self.attn(x)
+        a, self_output = self.attn(x)
         n = self.ln_1(x + a)
         m = self.mlp(n)
         h = self.ln_2(n + m)
-        return h
+        return h, self_output #! Add self-attention head output
 
 
 class OpenAIGPTLMHead(nn.Module):
@@ -634,10 +634,17 @@ class OpenAIGPTModel(OpenAIGPTPreTrainedModel):
         # Add the position information to the input embeddings
         # h = e.sum(dim=2)
         hidden_states = inputs_embeds + position_embeds + token_type_embeds
+
+        # Append all encoded vector from layer and head
+        all_encoder_layers = []
+        all_self_attention_layers = []
+
         for block in self.h:
-            hidden_states = block(hidden_states)
+            hidden_states, self_output = block(hidden_states)
+            all_encoder_layers.append(hidden_states)
+            all_self_attention_layers.append(self_output)
         output_shape = input_shape + (hidden_states.size(-1),)
-        return hidden_states.view(*output_shape)
+        return all_encoder_layers, all_self_attention_layers
 
 
 class OpenAIGPTLMHeadModel(OpenAIGPTPreTrainedModel):
