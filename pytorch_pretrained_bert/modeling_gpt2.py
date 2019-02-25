@@ -244,9 +244,9 @@ class Attention(nn.Module):
             value = torch.cat((past_value, value), dim=-2)
         present = torch.stack((key.transpose(-2, -1), value))  # transpose to have same shapes for stacking
         a = self._attn(query, key, value)
-        a = self.merge_heads(a)
-        a = self.c_proj(a)
-        return a, present
+        self_output = self.merge_heads(a)
+        a = self.c_proj(self_output)
+        return a, present, self_output
 
 
 class MLP(nn.Module):
@@ -273,11 +273,11 @@ class Block(nn.Module):
         self.mlp = MLP(4 * nx, config)
 
     def forward(self, x, layer_past=None):
-        a, present = self.attn(self.ln_1(x), layer_past=layer_past)
+        a, present, self_output = self.attn(self.ln_1(x), layer_past=layer_past)
         x = x + a
         m = self.mlp(self.ln_2(x))
         x = x + m
-        return x, present
+        return x, present, self_output #! Add self-attention head output
 
 
 class GPT2LMHead(nn.Module):
@@ -544,12 +544,19 @@ class GPT2Model(GPT2PreTrainedModel):
             token_type_embeds = 0
         hidden_states = inputs_embeds + position_embeds + token_type_embeds
         presents = []
+
+        # Append all encoded vector from layer and head
+        all_encoder_layers = []
+        all_self_attention_layers = []
+
         for block, layer_past in zip(self.h, past):
-            hidden_states, present = block(hidden_states, layer_past)
+            hidden_states, present, self_output = block(hidden_states, layer_past)
             presents.append(present)
+            all_encoder_layers.append(hidden_states)
+            all_self_attention_layers.append(self_output)
         hidden_states = self.ln_f(hidden_states)
         output_shape = input_shape + (hidden_states.size(-1),)
-        return hidden_states.view(*output_shape), presents
+        return all_encoder_layers, presents, all_self_attention_layers
 
 
 class GPT2LMHeadModel(GPT2PreTrainedModel):
