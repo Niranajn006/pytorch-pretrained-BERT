@@ -434,11 +434,11 @@ class MultiHeadAttn(nn.Module):
 
         # [qlen x klen x bsz x n_head] + [klen x bsz x n_head x d_head] -> [qlen x bsz x n_head x d_head]
         attn_vec = torch.einsum('ijbn,jbnd->ibnd', (attn_prob, head_v))
-        attn_vec = attn_vec.contiguous().view(
+        self_output = attn_vec.contiguous().view(
             attn_vec.size(0), attn_vec.size(1), self.n_head * self.d_head)
 
         ##### linear projection
-        attn_out = self.o_net(attn_vec)
+        attn_out = self.o_net(self_output)
         attn_out = self.drop(attn_out)
 
         if self.pre_lnorm:
@@ -448,7 +448,7 @@ class MultiHeadAttn(nn.Module):
             ##### residual connection + layer normalization
             output = self.layer_norm(h + attn_out)
 
-        return output
+        return output, self_output
 
 class RelMultiHeadAttn(nn.Module):
     def __init__(self, n_head, d_model, d_head, dropout, dropatt=0,
@@ -593,11 +593,11 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         attn_vec = torch.einsum('ijbn,jbnd->ibnd', (attn_prob, w_head_v))
 
         # [qlen x bsz x n_head x d_head]
-        attn_vec = attn_vec.contiguous().view(
+        self_output = attn_vec.contiguous().view(
             attn_vec.size(0), attn_vec.size(1), self.n_head * self.d_head)
 
         ##### linear projection
-        attn_out = self.o_net(attn_vec)
+        attn_out = self.o_net(self_output)
         attn_out = self.drop(attn_out)
 
         if self.pre_lnorm:
@@ -607,7 +607,7 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
             ##### residual connection + layer normalization
             output = self.layer_norm(w + attn_out)
 
-        return output
+        return output, self_output
 
 class RelLearnableMultiHeadAttn(RelMultiHeadAttn):
     def __init__(self, *args, **kwargs):
@@ -678,11 +678,11 @@ class RelLearnableMultiHeadAttn(RelMultiHeadAttn):
         attn_vec = torch.einsum('ijbn,jbnd->ibnd', (attn_prob, w_head_v))
 
         # [qlen x bsz x n_head x d_head]
-        attn_vec = attn_vec.contiguous().view(
+        self_output = attn_vec.contiguous().view(
             attn_vec.size(0), attn_vec.size(1), self.n_head * self.d_head)
 
         ##### linear projection
-        attn_out = self.o_net(attn_vec)
+        attn_out = self.o_net(self_output)
         attn_out = self.drop(attn_out)
 
         if self.pre_lnorm:
@@ -692,7 +692,7 @@ class RelLearnableMultiHeadAttn(RelMultiHeadAttn):
             ##### residual connection + layer normalization
             output = self.layer_norm(w + attn_out)
 
-        return output
+        return output, self_output
 
 class DecoderLayer(nn.Module):
     def __init__(self, n_head, d_model, d_head, d_inner, dropout, **kwargs):
@@ -704,11 +704,11 @@ class DecoderLayer(nn.Module):
 
     def forward(self, dec_inp, dec_attn_mask=None, mems=None):
 
-        output = self.dec_attn(dec_inp, attn_mask=dec_attn_mask,
+        output, self_output = self.dec_attn(dec_inp, attn_mask=dec_attn_mask,
                                mems=mems)
         output = self.pos_ff(output)
 
-        return output
+        return output, self_output
 
 class RelLearnableDecoderLayer(nn.Module):
     def __init__(self, n_head, d_model, d_head, d_inner, dropout,
@@ -722,12 +722,12 @@ class RelLearnableDecoderLayer(nn.Module):
 
     def forward(self, dec_inp, r_emb, r_w_bias, r_bias, dec_attn_mask=None, mems=None):
 
-        output = self.dec_attn(dec_inp, r_emb, r_w_bias, r_bias,
+        output, self_output = self.dec_attn(dec_inp, r_emb, r_w_bias, r_bias,
                                attn_mask=dec_attn_mask,
                                mems=mems)
         output = self.pos_ff(output)
 
-        return output
+        return output, self_output
 
 class RelPartialLearnableDecoderLayer(nn.Module):
     def __init__(self, n_head, d_model, d_head, d_inner, dropout,
@@ -741,12 +741,12 @@ class RelPartialLearnableDecoderLayer(nn.Module):
 
     def forward(self, dec_inp, r, dec_attn_mask=None, mems=None):
 
-        output = self.dec_attn(dec_inp, r,
+        output, self_output = self.dec_attn(dec_inp, r,
                                attn_mask=dec_attn_mask,
                                mems=mems)
         output = self.pos_ff(output)
 
-        return output
+        return output, self_output
 
 
 class AdaptiveEmbedding(nn.Module):
@@ -1161,6 +1161,9 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
                 word_emb.new_ones(qlen, klen), diagonal=1+mlen).byte()[:,:,None]
 
         hids = []
+        all_encoder_layers = []
+        all_self_attention_layers = []
+
         if self.attn_type == 0: # default
             pos_seq = torch.arange(klen-1, -1, -1.0, device=word_emb.device, 
                                    dtype=word_emb.dtype)
@@ -1174,7 +1177,10 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
             for i, layer in enumerate(self.layers):
                 hids.append(core_out)
                 mems_i = None if mems is None else mems[i]
-                core_out = layer(core_out, pos_emb, dec_attn_mask=dec_attn_mask, mems=mems_i)
+                core_out, self_output = layer(core_out, pos_emb, dec_attn_mask=dec_attn_mask, mems=mems_i)
+                all_encoder_layers.append(core_out.transpose(0, 1).contiguous())
+                all_self_attention_layers.append(self_output.transpose(0, 1).contiguous())
+
         elif self.attn_type == 1: # learnable
             core_out = self.drop(word_emb)
             for i, layer in enumerate(self.layers):
@@ -1186,8 +1192,11 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
                     r_emb, r_bias = self.r_emb[i], self.r_bias[i]
 
                 mems_i = None if mems is None else mems[i]
-                core_out = layer(core_out, r_emb, self.r_w_bias[i],
+                core_out, self_output = layer(core_out, r_emb, self.r_w_bias[i],
                         r_bias, dec_attn_mask=dec_attn_mask, mems=mems_i)
+                all_encoder_layers.append(core_out.transpose(0, 1).contiguous())
+                all_self_attention_layers.append(self_output.transpose(0, 1).contiguous())
+
         elif self.attn_type == 2: # absolute
             pos_seq = torch.arange(klen - 1, -1, -1.0, device=word_emb.device,
                                    dtype=word_emb.dtype)
@@ -1202,8 +1211,10 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
                 mems_i = None if mems is None else mems[i]
                 if mems_i is not None and i == 0:
                     mems_i += pos_emb[:mlen]
-                core_out = layer(core_out, dec_attn_mask=dec_attn_mask,
-                                 mems=mems_i)
+                core_out, self_output = layer(core_out, dec_attn_mask=dec_attn_mask, mems=mems_i)
+                all_encoder_layers.append(core_out.transpose(0, 1).contiguous())
+                all_self_attention_layers.append(self_output.transpose(0, 1).contiguous())
+
         elif self.attn_type == 3:
             core_out = self.drop(word_emb)
 
@@ -1221,14 +1232,16 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
                     mems_i += cur_emb.view(mlen, 1, -1)
                 core_out += self.r_emb[i][-qlen:].view(qlen, 1, -1)
 
-                core_out = layer(core_out, dec_attn_mask=dec_attn_mask,
+                core_out, self_output = layer(core_out, dec_attn_mask=dec_attn_mask,
                                  mems=mems_i)
+                all_encoder_layers.append(core_out.transpose(0, 1).contiguous())
+                all_self_attention_layers.append(self_output)
 
         core_out = self.drop(core_out)
 
         new_mems = self._update_mems(hids, mems, mlen, qlen)
 
-        return core_out, new_mems
+        return all_encoder_layers, all_self_attention_layers
 
     def forward(self, input_ids, mems=None):
         """ Params:
@@ -1246,15 +1259,16 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
         """
         # the original code for Transformer-XL used shapes [len, bsz] but we want a unified interface in the library
         # so we transpose here from shape [bsz, len] to shape [len, bsz]
+        print(input_ids.shape)
         input_ids = input_ids.transpose(0, 1).contiguous()
 
         if mems is None:
             mems = self.init_mems(input_ids)
-        last_hidden, new_mems = self._forward(input_ids, mems=mems)
+        all_encoder_layers, all_self_attention_layers = self._forward(input_ids, mems=mems)
 
         # We transpose back here to shape [bsz, len, hidden_dim]
-        last_hidden = last_hidden.transpose(0, 1).contiguous()
-        return (last_hidden, new_mems)
+        # last_hidden = last_hidden.transpose(0, 1).contiguous()
+        return all_encoder_layers, all_self_attention_layers
 
 
 class TransfoXLLMHeadModel(TransfoXLPreTrainedModel):
